@@ -32,10 +32,13 @@ Options (apply to start/status/stop):
   --parallel N         Parallel curl calls per cycle per host (default: 4)
   --sleep SEC          Pause between cycles (default: 0)
   --cpu-duration SEC   CPU load duration per request (default: 2)
-  --cpu-workers N      CPU worker multiplier (default: 4)
+  --cpu-workers N      Number of CPU processes spawned server-side (default: 4)
+  --cpu-spin N         Inner spin factor per process (default: 200000)
   --memory-mb MB       Memory to request per call (default: 256)
   --memory-hold SEC    How long to hold memory (default: 1.5)
+  --memory-workers N   Parallel memory allocators (default: 1)
   --network-mb MB      Network MB to stream per call (default: 25)
+  --network-chunk-kb K Chunk size for network streaming (default: 256)
 
 Examples:
   ./scripts/swarm_stress.sh start --target http://10.0.0.10:7777 --mode full
@@ -75,9 +78,12 @@ PARALLEL=4
 REST_INTERVAL=0
 CPU_DURATION=2
 CPU_WORKERS=4
+CPU_SPIN=200000
 MEMORY_MB=256
 MEMORY_HOLD=1.5
+MEMORY_WORKERS=1
 NETWORK_MB=25
+NETWORK_CHUNK_KB=256
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -121,6 +127,11 @@ while [ $# -gt 0 ]; do
             CPU_WORKERS="$2"
             shift 2
             ;;
+        --cpu-spin)
+            [ $# -ge 2 ] || { echo "Missing value for --cpu-spin" >&2; exit 1; }
+            CPU_SPIN="$2"
+            shift 2
+            ;;
         --memory-mb)
             [ $# -ge 2 ] || { echo "Missing value for --memory-mb" >&2; exit 1; }
             MEMORY_MB="$2"
@@ -131,9 +142,19 @@ while [ $# -gt 0 ]; do
             MEMORY_HOLD="$2"
             shift 2
             ;;
+        --memory-workers)
+            [ $# -ge 2 ] || { echo "Missing value for --memory-workers" >&2; exit 1; }
+            MEMORY_WORKERS="$2"
+            shift 2
+            ;;
         --network-mb)
             [ $# -ge 2 ] || { echo "Missing value for --network-mb" >&2; exit 1; }
             NETWORK_MB="$2"
+            shift 2
+            ;;
+        --network-chunk-kb)
+            [ $# -ge 2 ] || { echo "Missing value for --network-chunk-kb" >&2; exit 1; }
+            NETWORK_CHUNK_KB="$2"
             shift 2
             ;;
         -h|--help)
@@ -154,10 +175,10 @@ if [ "${#HOSTS[@]}" -eq 0 ]; then
 fi
 
 build_query_string() {
-    local base="cpu=true&memory=true&cpu_duration=${CPU_DURATION}&cpu_workers=${CPU_WORKERS}&memory_mb=${MEMORY_MB}&memory_hold=${MEMORY_HOLD}"
+    local base="cpu=true&memory=true&cpu_duration=${CPU_DURATION}&cpu_workers=${CPU_WORKERS}&cpu_spin=${CPU_SPIN}&memory_mb=${MEMORY_MB}&memory_hold=${MEMORY_HOLD}&memory_workers=${MEMORY_WORKERS}"
     case "$MODE" in
         full)
-            echo "${base}&network=true&network_mb=${NETWORK_MB}"
+            echo "${base}&network=true&network_mb=${NETWORK_MB}&network_chunk_kb=${NETWORK_CHUNK_KB}"
             ;;
         compute)
             echo "${base}&network=false"

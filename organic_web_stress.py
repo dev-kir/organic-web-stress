@@ -14,6 +14,7 @@ import socket
 import os
 from datetime import datetime
 from typing import Any, Dict
+from concurrent.futures import ProcessPoolExecutor
 
 from fastapi import FastAPI, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -23,6 +24,8 @@ app = FastAPI(title="Organic Web Stress", version="2.0")
 
 SERVER_ID = socket.gethostname()
 request_counter = {"total": 0, "by_endpoint": {}}
+MAX_CPU_PROCESSES = max(4, (os.cpu_count() or 2) * 2)
+CPU_EXECUTOR = ProcessPoolExecutor(max_workers=MAX_CPU_PROCESSES)
 
 # ==============================
 # HELPER FUNCTIONS
@@ -66,64 +69,112 @@ def add_tracking_headers(response: Response, endpoint: str, start_time: float):
     response.headers["X-Endpoint"] = endpoint
     
     request_counter["total"] += 1
-    request_counter["by_endpoint"][endpoint] = request_counter["by_endpoint"].get(endpoint, 0) + 1
+request_counter["by_endpoint"][endpoint] = request_counter["by_endpoint"].get(endpoint, 0) + 1
 
 
-async def run_cpu_stress(cpu_duration: float, cpu_workers: int) -> Dict[str, Any]:
-    """Run CPU stress asynchronously without blocking event loop"""
+def _cpu_worker_process(duration: float, spin_factor: int, worker_id: int) -> Dict[str, Any]:
+    """Run CPU operations in a dedicated process to saturate cores"""
+    cpu_start = time.time()
+    deadline = cpu_start + max(0.1, duration)
+    spin = max(10_000, spin_factor)
+    iterations = 0
 
-    def _cpu_worker(duration: float, workers: int) -> Dict[str, Any]:
-        cpu_start = time.time()
-        iterations = 0
-        deadline = cpu_start + max(0.1, duration)
-        multiplier = max(1, workers)
+    while time.time() < deadline:
+        for _ in range(spin):
+            math.sqrt(random.random() * 999_999)
+            iterations += 1
 
-        while time.time() < deadline:
-            for _ in range(multiplier * 100_000):
-                math.sqrt(random.random() * 9999)
-                iterations += 1
-
-        return {
-            "duration": round(time.time() - cpu_start, 3),
-            "iterations": iterations,
-            "workers": workers,
-        }
-
-    return await asyncio.to_thread(_cpu_worker, cpu_duration, cpu_workers)
+    return {
+        "worker_id": worker_id,
+        "elapsed": round(time.time() - cpu_start, 3),
+        "iterations": iterations,
+    }
 
 
-async def run_memory_stress(memory_mb: int, memory_hold: float) -> Dict[str, Any]:
-    """Allocate/hold memory asynchronously"""
+async def run_cpu_stress(cpu_duration: float, cpu_workers: int, cpu_spin: int) -> Dict[str, Any]:
+    """Run CPU stress using multiple processes"""
+    worker_count = min(max(1, cpu_workers), MAX_CPU_PROCESSES)
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(
+            CPU_EXECUTOR,
+            _cpu_worker_process,
+            cpu_duration,
+            cpu_spin,
+            worker_id,
+        )
+        for worker_id in range(worker_count)
+    ]
 
-    def _memory_worker(mem_mb: int, hold: float) -> Dict[str, Any]:
-        mem_start = time.time()
-        chunks = []
-        allocated = 0
+    worker_stats = await asyncio.gather(*tasks)
+    total_iterations = sum(w["iterations"] for w in worker_stats)
+    longest = max((w["elapsed"] for w in worker_stats), default=0.0)
 
-        try:
-            for _ in range(max(1, mem_mb // 64)):
-                chunk = bytearray(64 * 1024 * 1024)
-                chunk[0] = 1
-                chunk[-1] = 1
-                chunks.append(chunk)
+    return {
+        "workers": worker_count,
+        "spin_factor": cpu_spin,
+        "iterations": total_iterations,
+        "elapsed": longest,
+        "per_worker": worker_stats,
+    }
 
-            if hold > 0:
-                time.sleep(hold)
 
-            allocated = sum(len(c) for c in chunks)
-        except MemoryError:
-            allocated = sum(len(c) for c in chunks)
-        finally:
-            chunks.clear()
+def _memory_worker(mem_mb: int, hold: float, worker_id: int) -> Dict[str, Any]:
+    mem_start = time.time()
+    chunks = []
+    allocated = 0
+    target_bytes = max(1, mem_mb) * 1024 * 1024
+    chunk_size = 64 * 1024 * 1024
 
-        return {
-            "requested_mb": mem_mb,
-            "allocated_mb": round(allocated / (1024 * 1024), 2),
-            "hold_seconds": hold,
-            "elapsed": round(time.time() - mem_start, 3),
-        }
+    try:
+        while allocated < target_bytes:
+            block = bytearray(min(chunk_size, target_bytes - allocated))
+            block[0] = 1
+            block[-1] = 1
+            chunks.append(block)
+            allocated += len(block)
 
-    return await asyncio.to_thread(_memory_worker, memory_mb, memory_hold)
+        if hold > 0:
+            time.sleep(hold)
+    except MemoryError:
+        allocated = sum(len(c) for c in chunks)
+    finally:
+        chunks.clear()
+
+    return {
+        "worker_id": worker_id,
+        "requested_mb": mem_mb,
+        "allocated_mb": round(allocated / (1024 * 1024), 2),
+        "hold_seconds": hold,
+        "elapsed": round(time.time() - mem_start, 3),
+    }
+
+
+async def run_memory_stress(memory_mb: int, memory_hold: float, memory_workers: int) -> Dict[str, Any]:
+    """Allocate/hold memory asynchronously across multiple workers"""
+    total_request = max(1, memory_mb)
+    worker_count = min(max(1, memory_workers), total_request)
+    per_worker = total_request // worker_count
+    extra = total_request % worker_count
+
+    loop = asyncio.get_running_loop()
+    tasks = []
+    for worker_id in range(worker_count):
+        quota = per_worker + (1 if worker_id < extra else 0)
+        tasks.append(asyncio.to_thread(_memory_worker, quota, memory_hold, worker_id))
+
+    worker_stats = await asyncio.gather(*tasks)
+    total_allocated = sum(w["allocated_mb"] for w in worker_stats)
+    longest = max((w["elapsed"] for w in worker_stats), default=0.0)
+
+    return {
+        "workers": worker_count,
+        "requested_mb": memory_mb,
+        "allocated_mb": round(total_allocated, 2),
+        "hold_seconds": memory_hold,
+        "elapsed": longest,
+        "per_worker": worker_stats,
+    }
 
 
 async def gather_task_results(tasks: Dict[str, asyncio.Task]) -> Dict[str, Any]:
@@ -278,9 +329,12 @@ async def stress(
     network: bool = Query(False),
     cpu_duration: float = Query(1.0),
     cpu_workers: int = Query(1),
+    cpu_spin: int = Query(200_000),
     memory_mb: int = Query(128),
     memory_hold: float = Query(1.0),
+    memory_workers: int = Query(1),
     network_mb: int = Query(5),
+    network_chunk_kb: int = Query(256),
 ):
     """Flexible stress endpoint - mix CPU, memory, network"""
     start = time.time()
@@ -293,15 +347,15 @@ async def stress(
     # CPU and memory load run concurrently using background tasks
     pending_tasks: Dict[str, asyncio.Task] = {}
     if cpu:
-        pending_tasks["cpu"] = asyncio.create_task(run_cpu_stress(cpu_duration, cpu_workers))
+        pending_tasks["cpu"] = asyncio.create_task(run_cpu_stress(cpu_duration, cpu_workers, cpu_spin))
 
     if memory:
-        pending_tasks["memory"] = asyncio.create_task(run_memory_stress(memory_mb, memory_hold))
+        pending_tasks["memory"] = asyncio.create_task(run_memory_stress(memory_mb, memory_hold, memory_workers))
 
     # Network transfer
     if network:
         total_bytes = network_mb * 1024 * 1024
-        chunk_size = 256 * 1024  # 256KB chunks
+        chunk_size = max(8, network_chunk_kb) * 1024
         
         async def stream():
             sent = 0
@@ -316,6 +370,7 @@ async def stress(
                 "requested_mb": network_mb,
                 "sent_bytes": sent,
                 "sent_mb": round(sent / (1024 * 1024), 2),
+                "chunk_kb": round(chunk_size / 1024, 2),
             }
             if pending_tasks:
                 stats.update(await gather_task_results(pending_tasks))

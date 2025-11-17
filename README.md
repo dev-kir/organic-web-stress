@@ -56,7 +56,8 @@ Status checks whether the remote PID stored at `/tmp/organic_stress_client.pid` 
 - `--memory-mb`, `--memory-hold`, `--memory-workers` configure how much RAM each request grabs and how many parallel allocators run.
 - `--network-mb`, `--network-chunk-kb` control the total bytes streamed back per request and the chunk size (larger chunks push network interfaces harder).
 - `--parallel` controls how many concurrent requests each node fires per cycle.
-- `--sleep` adds a pause (seconds) between request bursts if you need a saw-tooth profile instead of constant pressure.
+- `--pattern burst|steady` lets you choose between bursty waves (default) and steady mode, which keeps the configured number of concurrent requests alive at all times for a flatter resource graph.
+- `--sleep` adds a pause (seconds) between request bursts or between steady-mode iterations.
 
 ### Heavy-load recipe (50 seconds)
 
@@ -69,6 +70,7 @@ If you want all Alpine nodes to smash CPU, memory, and network simultaneously fo
   --mode full \
   --duration 50 \
   --parallel 30 \
+  --pattern steady \
   --cpu-duration 5 \
   --cpu-workers 8 \
   --cpu-spin 400000 \
@@ -85,6 +87,12 @@ If you want to run the client script manually on one node you can `scp scripts/a
 
 ```bash
 ssh alpine-1 "/tmp/alpine_stress_client.sh http://your-service:7777 'cpu=true&memory=true&network=true&cpu_duration=2&cpu_workers=4&memory_mb=256&memory_hold=1.5&network_mb=10' 900 4 0"
+
+Add a final `steady` argument if you want constant pressure from a single Pi:
+
+```bash
+ssh alpine-1 "/tmp/alpine_stress_client.sh http://your-service:7777 'cpu=true&memory=true&network=true&cpu_duration=2&cpu_workers=4&memory_mb=256&memory_hold=1.5&network_mb=10' 900 4 0 steady"
+```
 ```
 
 This setup lets you reproduce failover + redeploy timings (one node vs multiple nodes) while collecting metrics from Grafana/Prometheus.

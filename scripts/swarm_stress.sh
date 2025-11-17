@@ -31,6 +31,7 @@ Options (apply to start/status/stop):
   --duration SEC       How long each client runs (default: 300)
   --parallel N         Parallel curl calls per cycle per host (default: 4)
   --sleep SEC          Pause between cycles (default: 0)
+  --pattern MODE       burst (default) or steady for constant concurrency
   --cpu-duration SEC   CPU load duration per request (default: 2)
   --cpu-workers N      Number of CPU processes spawned server-side (default: 4)
   --cpu-spin N         Inner spin factor per process (default: 200000)
@@ -76,6 +77,7 @@ MODE="full"
 DURATION=300
 PARALLEL=4
 REST_INTERVAL=0
+PATTERN="burst"
 CPU_DURATION=2
 CPU_WORKERS=4
 CPU_SPIN=200000
@@ -115,6 +117,11 @@ while [ $# -gt 0 ]; do
         --sleep)
             [ $# -ge 2 ] || { echo "Missing value for --sleep" >&2; exit 1; }
             REST_INTERVAL="$2"
+            shift 2
+            ;;
+        --pattern)
+            [ $# -ge 2 ] || { echo "Missing value for --pattern" >&2; exit 1; }
+            PATTERN="$2"
             shift 2
             ;;
         --cpu-duration)
@@ -201,7 +208,7 @@ start_host() {
     local query="$2"
     echo "[${host}] starting stress client -> ${TARGET}/stress?${query}"
     push_client "$host"
-    ssh "${SSH_BASE_OPTS[@]}" "$host" "nohup ${REMOTE_CLIENT_PATH} '${TARGET}' '${query}' '${DURATION}' '${PARALLEL}' '${REST_INTERVAL}' > ${REMOTE_LOG_FILE} 2>&1 & echo \$! > ${REMOTE_PID_FILE}"
+    ssh "${SSH_BASE_OPTS[@]}" "$host" "nohup ${REMOTE_CLIENT_PATH} '${TARGET}' '${query}' '${DURATION}' '${PARALLEL}' '${REST_INTERVAL}' '${PATTERN}' > ${REMOTE_LOG_FILE} 2>&1 & echo \$! > ${REMOTE_PID_FILE}"
 }
 
 stop_host() {

@@ -71,7 +71,7 @@ def add_tracking_headers(response: Response, endpoint: str, start_time: float):
     response.headers["X-Endpoint"] = endpoint
     
     request_counter["total"] += 1
-request_counter["by_endpoint"][endpoint] = request_counter["by_endpoint"].get(endpoint, 0) + 1
+    request_counter["by_endpoint"][endpoint] = request_counter["by_endpoint"].get(endpoint, 0) + 1
 
 
 def get_cpu_executor() -> ProcessPoolExecutor:

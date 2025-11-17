@@ -13,8 +13,9 @@ import uuid
 import socket
 import os
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from concurrent.futures import ProcessPoolExecutor
+from threading import Lock
 
 from fastapi import FastAPI, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -25,7 +26,8 @@ app = FastAPI(title="Organic Web Stress", version="2.0")
 SERVER_ID = socket.gethostname()
 request_counter = {"total": 0, "by_endpoint": {}}
 MAX_CPU_PROCESSES = max(4, (os.cpu_count() or 2) * 2)
-CPU_EXECUTOR = ProcessPoolExecutor(max_workers=MAX_CPU_PROCESSES)
+_cpu_executor: Optional[ProcessPoolExecutor] = None
+_cpu_executor_lock = Lock()
 
 # ==============================
 # HELPER FUNCTIONS
@@ -72,6 +74,16 @@ def add_tracking_headers(response: Response, endpoint: str, start_time: float):
 request_counter["by_endpoint"][endpoint] = request_counter["by_endpoint"].get(endpoint, 0) + 1
 
 
+def get_cpu_executor() -> ProcessPoolExecutor:
+    """Lazily create/reuse the process pool for CPU stress"""
+    global _cpu_executor
+    if _cpu_executor is None:
+        with _cpu_executor_lock:
+            if _cpu_executor is None:
+                _cpu_executor = ProcessPoolExecutor(max_workers=MAX_CPU_PROCESSES)
+    return _cpu_executor
+
+
 def _cpu_worker_process(duration: float, spin_factor: int, worker_id: int) -> Dict[str, Any]:
     """Run CPU operations in a dedicated process to saturate cores"""
     cpu_start = time.time()
@@ -95,9 +107,10 @@ async def run_cpu_stress(cpu_duration: float, cpu_workers: int, cpu_spin: int) -
     """Run CPU stress using multiple processes"""
     worker_count = min(max(1, cpu_workers), MAX_CPU_PROCESSES)
     loop = asyncio.get_running_loop()
+    executor = get_cpu_executor()
     tasks = [
         loop.run_in_executor(
-            CPU_EXECUTOR,
+            executor,
             _cpu_worker_process,
             cpu_duration,
             cpu_spin,

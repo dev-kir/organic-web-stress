@@ -348,14 +348,31 @@ async def stress(
     memory_workers: int = Query(1),
     network_mb: int = Query(5),
     network_chunk_kb: int = Query(256),
+    fail_after: float = Query(0.0),  # NEW: Simulate container failure after N seconds
+    slow_response: float = Query(0.0),  # NEW: Simulate slow response times
 ):
-    """Flexible stress endpoint - mix CPU, memory, network"""
+    """Flexible stress endpoint - mix CPU, memory, network, with realistic failure modes"""
     start = time.time()
-    
+
+    # Simulate slow response time (e.g., database lag, network latency)
+    if slow_response > 0:
+        await asyncio.sleep(slow_response)
+
     stats = {
         "requested": {"cpu": cpu, "memory": memory, "network": network},
         "server_id": SERVER_ID,
+        "slow_response_delay": slow_response,
     }
+
+    # Simulate container failure (crash after N seconds of stress)
+    if fail_after > 0:
+        async def delayed_crash():
+            await asyncio.sleep(fail_after)
+            # Simulate container crash by raising SystemExit
+            import os
+            os._exit(1)
+
+        asyncio.create_task(delayed_crash())
 
     # CPU and memory load run concurrently using background tasks
     pending_tasks: Dict[str, asyncio.Task] = {}
@@ -423,6 +440,103 @@ async def request_stats():
         "by_endpoint": request_counter["by_endpoint"],
         "timestamp": datetime.now().isoformat(),
     }
+
+@app.get("/degrade")
+async def gradual_degradation(
+    response: Response,
+    duration: int = Query(60, description="Duration of degradation in seconds"),
+    cpu_ramp: bool = Query(True, description="Gradually increase CPU usage"),
+    memory_leak: bool = Query(True, description="Simulate memory leak"),
+    slow_down: bool = Query(True, description="Gradually slow down responses"),
+):
+    """
+    Simulate gradual service degradation (realistic failure scenario)
+
+    This endpoint simulates a container that slowly becomes unhealthy over time:
+    - CPU usage ramps up gradually (like a runaway process)
+    - Memory usage increases (like a memory leak)
+    - Response times slow down (like database connection pool exhaustion)
+
+    This is more realistic than instant crashes and gives proactive recovery
+    time to detect and respond before complete failure.
+    """
+    start = time.time()
+    stats = {
+        "server_id": SERVER_ID,
+        "degradation_mode": {
+            "cpu_ramp": cpu_ramp,
+            "memory_leak": memory_leak,
+            "slow_down": slow_down,
+        },
+        "duration": duration,
+        "timeline": []
+    }
+
+    # Memory leak simulation - keep allocating chunks
+    memory_chunks = []
+
+    # Ramp up gradually over the duration
+    steps = min(duration, 20)  # Max 20 steps
+    step_duration = duration / steps
+
+    for step in range(steps):
+        step_start = time.time()
+        elapsed = step_start - start
+        progress = (step + 1) / steps  # 0.0 to 1.0
+
+        # CPU ramp: Start light, get heavier
+        if cpu_ramp:
+            # Spin factor increases from 100k to 1M
+            spin = int(100_000 + (progress * 900_000))
+            result = 0
+            for _ in range(spin):
+                result += math.sqrt(random.random() * 999)
+
+        # Memory leak: Allocate more memory each step
+        if memory_leak:
+            # Allocate 5MB to 50MB per step based on progress
+            leak_mb = int(5 + (progress * 45))
+            chunk = bytearray(leak_mb * 1024 * 1024)
+            chunk[0] = 1
+            chunk[-1] = 1
+            memory_chunks.append(chunk)
+
+        # Slow down: Add artificial delay
+        if slow_down:
+            # Delay increases from 0.1s to 2s
+            delay = 0.1 + (progress * 1.9)
+            await asyncio.sleep(delay)
+
+        # Record this step
+        stats["timeline"].append({
+            "step": step + 1,
+            "elapsed_s": round(elapsed, 1),
+            "progress": f"{int(progress * 100)}%",
+            "cpu_spin": spin if cpu_ramp else 0,
+            "memory_leaked_mb": sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0,
+        })
+
+        # Wait for next step (if not last)
+        if step < steps - 1:
+            step_elapsed = time.time() - step_start
+            remaining = step_duration - step_elapsed
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+
+    # Final stats
+    total_elapsed = time.time() - start
+    stats["total_elapsed_s"] = round(total_elapsed, 2)
+    stats["final_memory_leaked_mb"] = sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0
+
+    # Keep memory allocated a bit longer to ensure it shows up in metrics
+    if memory_leak:
+        await asyncio.sleep(2)
+
+    # Cleanup
+    memory_chunks.clear()
+
+    add_tracking_headers(response, "degrade", start)
+    return JSONResponse(stats)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=7777)

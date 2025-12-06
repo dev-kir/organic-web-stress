@@ -532,9 +532,9 @@ async def gradual_degradation(
     stats["ramp_up_duration_s"] = round(total_elapsed, 2)
     stats["final_memory_leaked_mb"] = sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0
 
-    # CRITICAL: SUSTAIN the peak load to actually trigger OOM and health check failures!
-    # Without this, container recovers before health checks fail
-    sustain_duration = max(20, duration // 2)  # Sustain for 20s minimum or half the duration
+    # CRITICAL: SUSTAIN the peak load for 60s MINIMUM to guarantee OOM and health check failures!
+    # This ensures container stays at 100% CPU and peak memory long enough to fail
+    sustain_duration = max(60, duration)  # SUSTAIN FOR 60s MINIMUM (or duration if longer)
     stats["sustaining_peak_for_s"] = sustain_duration
     stats["sustain_timeline"] = []
 
@@ -545,20 +545,22 @@ async def gradual_degradation(
     for sustain_step in range(sustain_steps):
         sustain_start = time.time()
 
-        # Keep CPU at PEAK
+        # Keep CPU at MAXIMUM (95-100%)
         if cpu_ramp:
             result = 0
-            # Use maximum spin factor to keep CPU at 95-100%
+            # Use maximum spin factor to keep CPU at 100%
             for _ in range(max_spin):
                 result += math.sqrt(random.random() * 999)
 
         # Memory is already allocated and held (stays at peak)
-        # No need to allocate more - just keep it
+        # Keep it allocated - DO NOT cleanup until end of sustain period
 
+        # Log every sustain step
         stats["sustain_timeline"].append({
             "sustain_step": sustain_step + 1,
             "elapsed_s": round(time.time() - start, 1),
             "memory_held_mb": sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0,
+            "cpu_load": "100%" if cpu_ramp else "0%",
         })
 
         await asyncio.sleep(3)  # Sustain for 3 seconds per step

@@ -484,18 +484,22 @@ async def gradual_degradation(
         elapsed = step_start - start
         progress = (step + 1) / steps  # 0.0 to 1.0
 
-        # CPU ramp: Start light, get heavier
+        # CPU ramp: Start light, get heavier (AGGRESSIVE!)
         if cpu_ramp:
-            # Spin factor increases from 100k to 1M
-            spin = int(100_000 + (progress * 900_000))
+            # Spin factor increases EXPONENTIALLY from 500k to 5M
+            # This creates much more aggressive CPU load
+            base_spin = 500_000
+            max_spin = 5_000_000
+            spin = int(base_spin + (progress ** 2) * (max_spin - base_spin))  # Quadratic growth!
             result = 0
             for _ in range(spin):
                 result += math.sqrt(random.random() * 999)
 
-        # Memory leak: Allocate more memory each step
+        # Memory leak: Allocate more memory each step (AGGRESSIVE!)
         if memory_leak:
-            # Allocate 5MB to 50MB per step based on progress
-            leak_mb = int(5 + (progress * 45))
+            # Allocate 20MB to 200MB per step based on progress (MUCH MORE!)
+            # Exponential growth to hit limits faster
+            leak_mb = int(20 + (progress ** 1.5) * 180)
             chunk = bytearray(leak_mb * 1024 * 1024)
             chunk[0] = 1
             chunk[-1] = 1

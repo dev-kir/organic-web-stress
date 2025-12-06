@@ -484,13 +484,13 @@ async def gradual_degradation(
         elapsed = step_start - start
         progress = (step + 1) / steps  # 0.0 to 1.0
 
-        # CPU ramp: Start light, get heavier (AGGRESSIVE!)
+        # CPU ramp: Start light, get heavier (ULTRA AGGRESSIVE!)
         if cpu_ramp:
-            # Spin factor increases EXPONENTIALLY from 500k to 5M
-            # This creates much more aggressive CPU load
-            base_spin = 500_000
-            max_spin = 5_000_000
-            spin = int(base_spin + (progress ** 2) * (max_spin - base_spin))  # Quadratic growth!
+            # Spin factor increases EXPONENTIALLY from 1M to 10M (even more aggressive!)
+            # This creates VERY high CPU load
+            base_spin = 1_000_000
+            max_spin = 10_000_000
+            spin = int(base_spin + (progress ** 2.5) * (max_spin - base_spin))  # Power 2.5 for faster growth!
             result = 0
             for _ in range(spin):
                 result += math.sqrt(random.random() * 999)
@@ -527,20 +527,135 @@ async def gradual_degradation(
             if remaining > 0:
                 await asyncio.sleep(remaining)
 
-    # Final stats
+    # Final stats after ramp-up
     total_elapsed = time.time() - start
-    stats["total_elapsed_s"] = round(total_elapsed, 2)
+    stats["ramp_up_duration_s"] = round(total_elapsed, 2)
     stats["final_memory_leaked_mb"] = sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0
 
-    # Keep memory allocated a bit longer to ensure it shows up in metrics
-    if memory_leak:
-        await asyncio.sleep(2)
+    # CRITICAL: SUSTAIN the peak load to actually trigger OOM and health check failures!
+    # Without this, container recovers before health checks fail
+    sustain_duration = max(20, duration // 2)  # Sustain for 20s minimum or half the duration
+    stats["sustaining_peak_for_s"] = sustain_duration
+    stats["sustain_timeline"] = []
+
+    await asyncio.sleep(1)  # Brief pause
+
+    # Keep PEAK load sustained (this is what triggers actual failures!)
+    sustain_steps = int(sustain_duration / 3)  # Every 3 seconds
+    for sustain_step in range(sustain_steps):
+        sustain_start = time.time()
+
+        # Keep CPU at PEAK
+        if cpu_ramp:
+            result = 0
+            # Use maximum spin factor to keep CPU at 95-100%
+            for _ in range(max_spin):
+                result += math.sqrt(random.random() * 999)
+
+        # Memory is already allocated and held (stays at peak)
+        # No need to allocate more - just keep it
+
+        stats["sustain_timeline"].append({
+            "sustain_step": sustain_step + 1,
+            "elapsed_s": round(time.time() - start, 1),
+            "memory_held_mb": sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0,
+        })
+
+        await asyncio.sleep(3)  # Sustain for 3 seconds per step
+
+    # Record final time
+    stats["total_elapsed_s"] = round(time.time() - start, 2)
 
     # Cleanup
     memory_chunks.clear()
 
     add_tracking_headers(response, "degrade", start)
     return JSONResponse(stats)
+
+@app.get("/traffic-spike")
+async def traffic_spike(
+    response: Response,
+    duration: int = Query(30, description="Duration of traffic spike in seconds"),
+    cpu_load: int = Query(80, description="Target CPU percentage"),
+    memory_mb: int = Query(512, description="Memory to allocate in MB"),
+    network_mb: int = Query(50, description="Network traffic to generate in MB"),
+):
+    """
+    Simulate a realistic traffic spike with CPU + Memory + Network load
+
+    This endpoint is designed for MTTR_3 testing (high traffic scenario).
+    It stresses CPU, Memory, AND Network simultaneously to trigger
+    predictive scaling in the recovery manager.
+
+    Use with concurrent requests to test load balancing and auto-scaling:
+    ```
+    for i in {1..10}; do
+      curl "http://...:7777/traffic-spike?duration=10&cpu_load=70&memory_mb=256&network_mb=20" &
+    done
+    ```
+    """
+    start = time.time()
+
+    stats = {
+        "server_id": SERVER_ID,
+        "scenario": "high_traffic_spike",
+        "config": {
+            "duration": duration,
+            "cpu_target": cpu_load,
+            "memory_mb": memory_mb,
+            "network_mb": network_mb,
+        }
+    }
+
+    # Calculate CPU spin to reach target CPU percentage
+    # Rough estimation: 1M spins ≈ 10% CPU per worker
+    workers = min(4, os.cpu_count() or 2)
+    target_spin = int((cpu_load / 100) * 10_000_000)
+
+    # Start all three loads concurrently
+    pending_tasks: Dict[str, asyncio.Task] = {}
+
+    # CPU load
+    pending_tasks["cpu"] = asyncio.create_task(
+        run_cpu_stress(duration, workers, target_spin)
+    )
+
+    # Memory load
+    pending_tasks["memory"] = asyncio.create_task(
+        run_memory_stress(memory_mb, duration, 1)
+    )
+
+    # Network load - stream data
+    total_bytes = network_mb * 1024 * 1024
+    chunk_size = 256 * 1024  # 256KB chunks
+
+    async def stream_with_stats():
+        sent = 0
+        stream_start = time.time()
+
+        while sent < total_bytes:
+            chunk = b"X" * min(chunk_size, total_bytes - sent)
+            yield chunk
+            sent += len(chunk)
+            await asyncio.sleep(0.001)  # Small delay to prevent blocking
+
+        # Collect CPU and memory results
+        if pending_tasks:
+            results = await gather_task_results(pending_tasks)
+            stats.update(results)
+
+        stats["network"] = {
+            "sent_mb": round(sent / (1024 * 1024), 2),
+            "duration_s": round(time.time() - stream_start, 2),
+        }
+        stats["total_elapsed_s"] = round(time.time() - start, 2)
+
+        # Send final stats as JSON at the end
+        summary = json.dumps({"stats": stats})
+        yield b"\n" + summary.encode()
+
+    add_tracking_headers(response, "traffic-spike", start)
+    return StreamingResponse(stream_with_stats(), media_type="application/octet-stream")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=7777)

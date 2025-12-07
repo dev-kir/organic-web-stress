@@ -495,15 +495,22 @@ async def gradual_degradation(
             for _ in range(spin):
                 result += math.sqrt(random.random() * 999)
 
-        # Memory leak: Allocate more memory each step (AGGRESSIVE!)
+        # Memory leak: Allocate MASSIVE amounts to trigger OOM!
         if memory_leak:
-            # Allocate 20MB to 200MB per step based on progress (MUCH MORE!)
-            # Exponential growth to hit limits faster
-            leak_mb = int(20 + (progress ** 1.5) * 180)
-            chunk = bytearray(leak_mb * 1024 * 1024)
-            chunk[0] = 1
-            chunk[-1] = 1
-            memory_chunks.append(chunk)
+            # Allocate 50MB to 500MB per step (10x more aggressive!)
+            # This will consume 5-10GB over 20 steps to trigger OOM
+            leak_mb = int(50 + (progress ** 1.5) * 450)
+            try:
+                chunk = bytearray(leak_mb * 1024 * 1024)
+                # Touch the memory to force actual allocation
+                chunk[0] = 1
+                chunk[-1] = 1
+                chunk[len(chunk) // 2] = 1  # Touch middle too
+                memory_chunks.append(chunk)
+            except MemoryError:
+                # If we hit memory limit, that's actually what we want!
+                # Just stop allocating more
+                pass
 
         # Slow down: Add artificial delay
         if slow_down:
@@ -552,14 +559,24 @@ async def gradual_degradation(
             for _ in range(max_spin):
                 result += math.sqrt(random.random() * 999)
 
-        # Memory is already allocated and held (stays at peak)
-        # Keep it allocated - DO NOT cleanup until end of sustain period
+        # Keep ADDING more memory during sustain to force OOM!
+        if memory_leak and sustain_step % 3 == 0:  # Every 3rd step (every 9s)
+            try:
+                # Add another 200MB chunk during sustain
+                extra_chunk = bytearray(200 * 1024 * 1024)
+                extra_chunk[0] = 1
+                extra_chunk[-1] = 1
+                memory_chunks.append(extra_chunk)
+            except MemoryError:
+                # Perfect! We hit the limit!
+                pass
 
         # Log every sustain step
+        current_mem_mb = sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0
         stats["sustain_timeline"].append({
             "sustain_step": sustain_step + 1,
             "elapsed_s": round(time.time() - start, 1),
-            "memory_held_mb": sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0,
+            "memory_held_mb": current_mem_mb,
             "cpu_load": "100%" if cpu_ramp else "0%",
         })
 

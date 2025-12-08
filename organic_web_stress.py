@@ -839,5 +839,33 @@ async def traffic_spike(
     add_tracking_headers(response, "traffic-spike", start)
     return StreamingResponse(stream_with_stats(), media_type="application/octet-stream")
 
+@app.get("/stress")
+async def constant_stress(
+    response: Response,
+    size: int = Query(100000000, description="Size of data to stream in bytes (default 100MB)"),
+):
+    """
+    Stream constant data for network stress testing.
+
+    This endpoint is designed to be called repeatedly with curl --limit-rate
+    to generate constant sustained network traffic at a precise rate.
+
+    Example:
+      # Generate 25 Mbps constant traffic:
+      while true; do curl --limit-rate 3200K -o /dev/null "http://...:7777/stress?size=100000000"; done
+    """
+    async def stream_constant_data():
+        sent = 0
+        chunk_size = 64 * 1024  # 64KB chunks
+
+        while sent < size:
+            chunk = b"X" * min(chunk_size, size - sent)
+            yield chunk
+            sent += len(chunk)
+            # No sleep - let curl's --limit-rate control the bandwidth
+
+    add_tracking_headers(response, "stress", time.time())
+    return StreamingResponse(stream_constant_data(), media_type="application/octet-stream")
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=7777)

@@ -508,14 +508,19 @@ async def gradual_degradation(
                 network_bytes_sent += chunk_size
 
                 # CRITICAL: Stream network data DURING the ramp step
-                # Send in smaller chunks to avoid blocking
+                # Send in smaller chunks spread evenly across the step duration
                 sent_this_step = 0
-                mini_chunk_size = 256 * 1024  # 256KB mini-chunks
+                mini_chunk_size = 64 * 1024  # 64KB mini-chunks (smaller for smoother streaming)
+
+                # Calculate delay to spread chunk_size across step_duration
+                num_chunks = max(1, chunk_size // mini_chunk_size)
+                delay_per_chunk = step_duration / num_chunks if num_chunks > 1 else 0.01
+
                 while sent_this_step < chunk_size:
                     mini_chunk = b"X" * min(mini_chunk_size, chunk_size - sent_this_step)
                     yield mini_chunk
                     sent_this_step += len(mini_chunk)
-                    await asyncio.sleep(0.001)  # Small delay
+                    await asyncio.sleep(delay_per_chunk)  # Evenly distributed
 
                 # Slow down: Add artificial delay
                 if slow_down:
@@ -552,20 +557,30 @@ async def gradual_degradation(
                         pass
 
                 # CRITICAL: Continue streaming network during sustain!
-                # Send 10MB chunks every sustain step (every 3s)
+                # Send 50MB spread evenly across 3 seconds (~17 MB/s = ~133 Mbps sustained rate)
                 if network_ramp:
-                    sustain_chunk_size = 10 * 1024 * 1024  # 10MB per step
+                    sustain_chunk_size = 50 * 1024 * 1024  # 50MB per 3s step
                     network_bytes_sent += sustain_chunk_size
 
+                    # Stream in small chunks with timing to achieve ~17 MB/s sustained
                     sent_this_sustain_step = 0
-                    mini_chunk_size = 256 * 1024  # 256KB mini-chunks
+                    mini_chunk_size = 64 * 1024  # 64KB mini-chunks (smaller for smoother streaming)
+
+                    # Calculate delay to spread 50MB across 3 seconds
+                    # 50MB / 3s = ~17 MB/s = ~133 Mbps (well above 40 Mbps threshold)
+                    # 64KB chunks = 50MB / 64KB = ~800 chunks
+                    # 3 seconds / 800 chunks = ~0.00375s per chunk
+                    num_chunks = sustain_chunk_size // mini_chunk_size
+                    delay_per_chunk = 3.0 / num_chunks  # Spread evenly across 3 seconds
+
                     while sent_this_sustain_step < sustain_chunk_size:
                         mini_chunk = b"X" * min(mini_chunk_size, sustain_chunk_size - sent_this_sustain_step)
                         yield mini_chunk
                         sent_this_sustain_step += len(mini_chunk)
-                        await asyncio.sleep(0.001)
-
-                await asyncio.sleep(3)
+                        await asyncio.sleep(delay_per_chunk)  # Evenly distributed timing
+                else:
+                    # If no network ramp, just sleep for the CPU/MEM stress
+                    await asyncio.sleep(3)
 
             # Send final stats as JSON
             stats = {

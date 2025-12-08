@@ -463,6 +463,113 @@ async def gradual_degradation(
     This is more realistic than instant crashes and gives proactive recovery
     time to detect and respond before complete failure.
     """
+
+    # If network ramp is enabled, use streaming response to send data during degradation
+    if network_ramp:
+        async def degradation_stream():
+            start = time.time()
+            network_bytes_sent = 0
+            memory_chunks = []
+
+            # Ramp up gradually over the duration
+            steps = min(duration, 20)  # Max 20 steps
+            step_duration = duration / steps
+
+            for step in range(steps):
+                step_start = time.time()
+                elapsed = step_start - start
+                progress = (step + 1) / steps  # 0.0 to 1.0
+
+                # CPU ramp: Start light, get heavier (ULTRA AGGRESSIVE!)
+                if cpu_ramp:
+                    base_spin = 1_000_000
+                    max_spin = 10_000_000
+                    spin = int(base_spin + (progress ** 2.5) * (max_spin - base_spin))
+                    result = 0
+                    for _ in range(spin):
+                        result += math.sqrt(random.random() * 999)
+
+                # Memory leak: Allocate MASSIVE amounts to trigger OOM!
+                if memory_leak:
+                    leak_mb = int(50 + (progress ** 1.5) * 450)
+                    try:
+                        chunk = bytearray(leak_mb * 1024 * 1024)
+                        chunk[0] = 1
+                        chunk[-1] = 1
+                        chunk[len(chunk) // 2] = 1
+                        memory_chunks.append(chunk)
+                    except MemoryError:
+                        pass
+
+                # Network ramp: Send data NOW during this step (not after!)
+                # Send progressively larger chunks (5MB to target MB)
+                chunk_mb = int(5 + (progress ** 2) * (network_mb_target - 5))
+                chunk_size = chunk_mb * 1024 * 1024
+                network_bytes_sent += chunk_size
+
+                # CRITICAL: Stream network data DURING the ramp step
+                # Send in smaller chunks to avoid blocking
+                sent_this_step = 0
+                mini_chunk_size = 256 * 1024  # 256KB mini-chunks
+                while sent_this_step < chunk_size:
+                    mini_chunk = b"X" * min(mini_chunk_size, chunk_size - sent_this_step)
+                    yield mini_chunk
+                    sent_this_step += len(mini_chunk)
+                    await asyncio.sleep(0.001)  # Small delay
+
+                # Slow down: Add artificial delay
+                if slow_down:
+                    delay = 0.1 + (progress * 1.9)
+                    await asyncio.sleep(delay)
+
+                # Wait for next step (if not last)
+                if step < steps - 1:
+                    step_elapsed = time.time() - step_start
+                    remaining = step_duration - step_elapsed
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+
+            # SUSTAIN peak load
+            sustain_duration = max(60, duration)
+            sustain_steps = int(sustain_duration / 3)
+            max_spin = 10_000_000
+
+            for sustain_step in range(sustain_steps):
+                # Keep CPU at MAXIMUM
+                if cpu_ramp:
+                    result = 0
+                    for _ in range(max_spin):
+                        result += math.sqrt(random.random() * 999)
+
+                # Keep adding memory during sustain
+                if memory_leak and sustain_step % 3 == 0:
+                    try:
+                        extra_chunk = bytearray(200 * 1024 * 1024)
+                        extra_chunk[0] = 1
+                        extra_chunk[-1] = 1
+                        memory_chunks.append(extra_chunk)
+                    except MemoryError:
+                        pass
+
+                await asyncio.sleep(3)
+
+            # Send final stats as JSON
+            stats = {
+                "server_id": SERVER_ID,
+                "total_elapsed_s": round(time.time() - start, 2),
+                "network_sent_mb": round(network_bytes_sent / (1024 * 1024), 2),
+                "memory_leaked_mb": sum(len(c) for c in memory_chunks) // (1024 * 1024),
+                "completed": True
+            }
+            yield f"\n{json.dumps(stats)}\n".encode()
+
+            # Cleanup
+            memory_chunks.clear()
+
+        from starlette.responses import StreamingResponse
+        return StreamingResponse(degradation_stream(), media_type="application/octet-stream")
+
+    # Original non-streaming path (when network_ramp=false)
     start = time.time()
     stats = {
         "server_id": SERVER_ID,
@@ -525,15 +632,6 @@ async def gradual_degradation(
             delay = 0.1 + (progress * 1.9)
             await asyncio.sleep(delay)
 
-        # Network ramp: Gradually send more data
-        if network_ramp:
-            # Send progressively larger chunks (5MB to target MB)
-            chunk_mb = int(5 + (progress ** 2) * (network_mb_target - 5))
-            chunk_size = chunk_mb * 1024 * 1024
-            # Don't actually send yet, just simulate generation
-            # (we'll send all data at the end as a stream)
-            network_bytes_sent += chunk_size
-
         # Record this step
         stats["timeline"].append({
             "step": step + 1,
@@ -541,7 +639,6 @@ async def gradual_degradation(
             "progress": f"{int(progress * 100)}%",
             "cpu_spin": spin if cpu_ramp else 0,
             "memory_leaked_mb": sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0,
-            "network_sent_mb": round(network_bytes_sent / (1024 * 1024), 2) if network_ramp else 0,
         })
 
         # Wait for next step (if not last)

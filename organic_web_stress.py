@@ -448,6 +448,8 @@ async def gradual_degradation(
     cpu_ramp: bool = Query(True, description="Gradually increase CPU usage"),
     memory_leak: bool = Query(True, description="Simulate memory leak"),
     slow_down: bool = Query(True, description="Gradually slow down responses"),
+    network_ramp: bool = Query(False, description="Gradually increase network traffic"),
+    network_mb_target: int = Query(100, description="Target network MB to send during ramp"),
 ):
     """
     Simulate gradual service degradation (realistic failure scenario)
@@ -456,6 +458,7 @@ async def gradual_degradation(
     - CPU usage ramps up gradually (like a runaway process)
     - Memory usage increases (like a memory leak)
     - Response times slow down (like database connection pool exhaustion)
+    - Network traffic increases (like sending large responses)
 
     This is more realistic than instant crashes and gives proactive recovery
     time to detect and respond before complete failure.
@@ -467,10 +470,14 @@ async def gradual_degradation(
             "cpu_ramp": cpu_ramp,
             "memory_leak": memory_leak,
             "slow_down": slow_down,
+            "network_ramp": network_ramp,
         },
         "duration": duration,
         "timeline": []
     }
+
+    # Track network data sent
+    network_bytes_sent = 0
 
     # Memory leak simulation - keep allocating chunks
     memory_chunks = []
@@ -518,6 +525,15 @@ async def gradual_degradation(
             delay = 0.1 + (progress * 1.9)
             await asyncio.sleep(delay)
 
+        # Network ramp: Gradually send more data
+        if network_ramp:
+            # Send progressively larger chunks (5MB to target MB)
+            chunk_mb = int(5 + (progress ** 2) * (network_mb_target - 5))
+            chunk_size = chunk_mb * 1024 * 1024
+            # Don't actually send yet, just simulate generation
+            # (we'll send all data at the end as a stream)
+            network_bytes_sent += chunk_size
+
         # Record this step
         stats["timeline"].append({
             "step": step + 1,
@@ -525,6 +541,7 @@ async def gradual_degradation(
             "progress": f"{int(progress * 100)}%",
             "cpu_spin": spin if cpu_ramp else 0,
             "memory_leaked_mb": sum(len(c) for c in memory_chunks) // (1024 * 1024) if memory_leak else 0,
+            "network_sent_mb": round(network_bytes_sent / (1024 * 1024), 2) if network_ramp else 0,
         })
 
         # Wait for next step (if not last)
@@ -584,9 +601,29 @@ async def gradual_degradation(
 
     # Record final time
     stats["total_elapsed_s"] = round(time.time() - start, 2)
+    stats["total_network_sent_mb"] = round(network_bytes_sent / (1024 * 1024), 2) if network_ramp else 0
 
     # Cleanup
     memory_chunks.clear()
+
+    # If network ramp enabled, return as streaming response to generate actual network traffic
+    if network_ramp and network_bytes_sent > 0:
+        async def stream_with_stats():
+            # Send data in chunks to generate network traffic
+            sent = 0
+            chunk_size = 256 * 1024  # 256KB chunks
+            while sent < network_bytes_sent:
+                chunk = b"X" * min(chunk_size, network_bytes_sent - sent)
+                yield chunk
+                sent += len(chunk)
+                await asyncio.sleep(0.001)  # Small delay to prevent blocking
+
+            # Send final stats as JSON
+            summary = json.dumps({"stats": stats})
+            yield b"\n" + summary.encode()
+
+        add_tracking_headers(response, "degrade", start)
+        return StreamingResponse(stream_with_stats(), media_type="application/octet-stream")
 
     add_tracking_headers(response, "degrade", start)
     return JSONResponse(stats)

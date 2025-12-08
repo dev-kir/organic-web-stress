@@ -551,6 +551,20 @@ async def gradual_degradation(
                     except MemoryError:
                         pass
 
+                # CRITICAL: Continue streaming network during sustain!
+                # Send 10MB chunks every sustain step (every 3s)
+                if network_ramp:
+                    sustain_chunk_size = 10 * 1024 * 1024  # 10MB per step
+                    network_bytes_sent += sustain_chunk_size
+
+                    sent_this_sustain_step = 0
+                    mini_chunk_size = 256 * 1024  # 256KB mini-chunks
+                    while sent_this_sustain_step < sustain_chunk_size:
+                        mini_chunk = b"X" * min(mini_chunk_size, sustain_chunk_size - sent_this_sustain_step)
+                        yield mini_chunk
+                        sent_this_sustain_step += len(mini_chunk)
+                        await asyncio.sleep(0.001)
+
                 await asyncio.sleep(3)
 
             # Send final stats as JSON
